@@ -1,7 +1,7 @@
 <?php
 /*** 
 pfsense_zbx.php - pfSense Zabbix Interface
-Version 0.9.0 - 12/12/2019 
+Version 0.9.1 - 2020-03-27 
 
 Written by Riccardo Bicelli <r.bicelli@gmail.com>
 This program is licensed under Apache 2.0 License
@@ -56,17 +56,40 @@ function pfz_test(){
 }
 
 
-function pfz_get_if_name($hwif){
-    
-     $ifdescrs = get_configured_interface_with_descr(true); 
-     foreach ($ifdescrs as $ifdescr => $ifname){	     
-          $ifinfo = get_interface_info($ifdescr);
-          if($ifinfo["hwif"]==$hwif){
-               echo $ifname;
-               return true;          
-          }
-     }
-    
+// Interface Discovery
+// Improved performance
+function pfz_interface_discovery() {
+    $ifdescrs = get_configured_interface_with_descr(true);
+    $ifaces = get_interface_arr();
+    $ifcs=array();
+ 
+    $json_string = '{"data":[';
+                   
+    foreach ($ifdescrs as $ifname => $ifdescr){
+          $ifinfo = get_interface_info($ifname);
+          $ifinfo["description"] = $ifdescr;
+          $ifcs[$ifname] = $ifinfo;
+    }
+
+    foreach ($ifaces as $hwif) {
+        $json_string .= '{"{#IFNAME}":"' . $hwif . '"';
+
+        $ifdescr = $hwif;
+        foreach($ifcs as $ifc=>$ifinfo){
+                if ($ifinfo["hwif"] == $hwif){
+                        $ifdescr = $ifinfo["description"];
+                        break;
+                }
+        }
+
+        $json_string .= ',"{#IFDESCR}":"' . $ifdescr . '"';
+        $json_string .= '},';
+    }
+    $json_string = rtrim($json_string,",");
+    $json_string .= "]}";
+
+    echo $json_string;
+
 }
 
 
@@ -87,7 +110,7 @@ function pfz_openvpn_serverdiscovery() {
      foreach ($servers as $server){
           $name = trim(preg_replace('/\w{3}(\d)?\:\d{4,5}/i', '', $server['name']));
           $json_string .= '{"{#SERVER}":"' . $server['vpnid'] . '"';
-          $json_string .= ',"{#NAME}":"' . $name . '"';
+          $json_string .= ',"{#NAME}":"' . $name . '"';  
           $json_string .= '},';
      }
 
@@ -98,12 +121,23 @@ function pfz_openvpn_serverdiscovery() {
 }
 
 
+/*
+ * Get OpenVPN Server Value
+ * TODO: If the server type is user auth consider the server Up/Listening if status is "none"
+*/
 function pfz_openvpn_servervalue($server_id,$valuekey){
      $servers = pfz_openvpn_get_all_servers();     
      foreach($servers as $server) {
           if($server['vpnid']==$server_id)
                $value = $server[$valuekey];
      }
+     
+     //Client Connections: isan array so it is sufficient to count elements     
+     if ($valuekey=="conns"){
+          $value=count($value);
+          if ($value=="") $value="0";
+     }     
+     
      if ($value=="") $value="none";
      echo $value;
 }
@@ -140,7 +174,8 @@ function pfz_openvpn_clientvalue($client_id, $valuekey){
 }
 
 
-//Services Discovery
+// Services Discovery
+// 2020-03-27: Added space replace with __ for issue #12
 function pfz_services_discovery(){
      $services = get_services();
 
@@ -152,10 +187,13 @@ function pfz_services_discovery(){
                $status = get_service_status($service);
                if ($status="") $status = 0;
 
-               if (empty($service['id'])) $id=""; 
-                    else $id = "." . $service["id"];
-
-               $json_string .= '{"{#SERVICE}":"' . $service['name'] . $id . '"';          
+               $id="";               
+               //id for OpenVPN               
+               if (!empty($service['id'])) $id = "." . $service["id"];
+               //zone for Captive Portal
+               if (!empty($service['zone'])) $id = "." . $service["zone"];
+                              
+               $json_string .= '{"{#SERVICE}":"' . str_replace(" ", "__", $service['name']) . $id . '"';          
                $json_string .= ',"{#DESCRIPTION}":"' . $service['description'] . '"';
                $json_string .= '},';
           }
@@ -167,7 +205,8 @@ function pfz_services_discovery(){
 
 }
 
-
+// Get service value
+// 2020-03-27: Added space replace in service name for issue #12
 function pfz_service_value($name,$value){
      $services = get_services();     
      
@@ -177,14 +216,21 @@ function pfz_service_value($name,$value){
      $stopped_on_carp_slave = array("haproxy","openvpn.");
      
      foreach ($services as $service){
-          if (empty($service['id'])) { 
-               $namecfr=$service["name"];
-               $carpcfr=$service["name"]; 
-          } else {
+          $namecfr=str_replace("__"," ",$service["name"]);
+          $carpcfr=str_replace("__"," ",$service["name"]);          
+
+          //OpenVPN          
+          if (!empty($service['id'])) {                           
                $namecfr = $service['name'] . "." . $service["id"];
                $carpcfr = $service['name'] . ".";          
           }
-                    
+
+          //Captive Portal
+          if (!empty($service['zone'])) {                           
+               $namecfr = $service['name'] . "." . $service["zone"];
+               $carpcfr = $service['name'] . ".";          
+          }          
+
           if ($namecfr == $name){
                switch ($value) {
                
@@ -323,6 +369,9 @@ function pfz_discovery($section){
                break;
           case "services":
                pfz_services_discovery();
+               break;
+          case "interfaces":
+               pfz_interface_discovery();
                break;
      }         
 }
